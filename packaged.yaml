@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: FileFinder serverless file management system with Cognito authentication
+Parameters:
+  BucketName:
+    Type: String
+    Default: filefinder-s3-bucket
+    Description: S3 bucket for FileFinder uploads. Change this if the name is already
+      taken.
+  TableName:
+    Type: String
+    Default: FileFinderRecords
+    Description: DynamoDB table for file metadata.
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 10
+    MemorySize: 256
+    Environment:
+      Variables:
+        S3_BUCKET_NAME:
+          Ref: BucketName
+        DYNAMODB_TABLE:
+          Ref: TableName
+Resources:
+  FileFinderUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: FileFinderUsers
+      AutoVerifiedAttributes:
+      - email
+      UsernameAttributes:
+      - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+      Schema:
+      - Name: email
+        Required: true
+        Mutable: false
+      - Name: name
+        Required: true
+        Mutable: true
+  FileFinderUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: FileFinderWebClient
+      UserPoolId:
+        Ref: FileFinderUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+      - ALLOW_USER_PASSWORD_AUTH
+      - ALLOW_USER_SRP_AUTH
+      - ALLOW_REFRESH_TOKEN_AUTH
+  FileFinderApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Cors:
+        AllowMethods: "'OPTIONS,GET,POST,DELETE'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn:
+              Fn::GetAtt:
+              - FileFinderUserPool
+              - Arn
+  UploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://filefinder-deploy-artifacts-088167543223-us-east-1/62b482a2d347010420bfaa32d3fdc8ce
+      Handler: uploadLambda.handler
+      Policies:
+      - S3CrudPolicy:
+          BucketName:
+            Ref: BucketName
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: TableName
+      Events:
+        UploadApi:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: FileFinderApi
+            Path: /upload
+            Method: post
+  SearchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://filefinder-deploy-artifacts-088167543223-us-east-1/62b482a2d347010420bfaa32d3fdc8ce
+      Handler: searchLambda.handler
+      Policies:
+      - S3ReadPolicy:
+          BucketName:
+            Ref: BucketName
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TableName
+      Events:
+        SearchApi:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: FileFinderApi
+            Path: /search
+            Method: get
+  DeleteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://filefinder-deploy-artifacts-088167543223-us-east-1/62b482a2d347010420bfaa32d3fdc8ce
+      Handler: deleteLambda.handler
+      Policies:
+      - S3CrudPolicy:
+          BucketName:
+            Ref: BucketName
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: TableName
+      Events:
+        DeleteApi:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: FileFinderApi
+            Path: /delete
+            Method: delete
+  ListFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://filefinder-deploy-artifacts-088167543223-us-east-1/62b482a2d347010420bfaa32d3fdc8ce
+      Handler: listLambda.handler
+      Policies:
+      - S3ReadPolicy:
+          BucketName:
+            Ref: BucketName
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TableName
+      Events:
+        ListApi:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: FileFinderApi
+            Path: /files
+            Method: get
+Outputs:
+  ApiUrl:
+    Description: API Gateway base URL
+    Value:
+      Fn::Sub: https://${FileFinderApi}.execute-api.${AWS::Region}.amazonaws.com/Prod
+  S3BucketName:
+    Description: Name of the S3 bucket
+    Value:
+      Ref: BucketName
+  DynamoDBTableName:
+    Description: Name of the DynamoDB table
+    Value:
+      Ref: TableName
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID for the frontend
+    Value:
+      Ref: FileFinderUserPool
+  CognitoUserPoolClientId:
+    Description: Cognito App Client ID for the frontend
+    Value:
+      Ref: FileFinderUserPoolClient

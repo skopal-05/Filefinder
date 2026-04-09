@@ -1,0 +1,18 @@
+{
+  "name": "filefinder-backend",
+  "version": "1.0.0",
+  "description": "AWS Lambda functions for the FileFinder serverless file manager.",
+  "main": "uploadLambda.js",
+  "type": "commonjs",
+  "scripts": {
+    "backfill-embeddings": "node backfillEmbeddings.js",
+    "lint": "echo \"Add your preferred linter here\""
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.916.0",
+    "@aws-sdk/client-s3": "^3.916.0",
+    "@aws-sdk/lib-dynamodb": "^3.916.0",
+    "@aws-sdk/s3-request-presigner": "^3.916.0",
+    "openai": "^6.33.0"
+  }
+}

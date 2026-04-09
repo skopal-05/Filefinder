@@ -1,0 +1,283 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: FileFinder serverless file management system with Cognito authentication
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: filefinder-s3-bucket
+    Description: S3 bucket for FileFinder uploads. Change this if the name is already taken.
+  TableName:
+    Type: String
+    Default: FileFinderRecords
+    Description: DynamoDB table for file metadata.
+  FrontendOrigin:
+    Type: String
+    Default: http://localhost:3000
+    Description: Allowed frontend origin for API CORS responses.
+  OwnerIndexName:
+    Type: String
+    Default: ownerSub-uploadedAt-index
+    Description: Recommended DynamoDB GSI name for per-user listing and search.
+  MaxUploadSizeBytes:
+    Type: Number
+    Default: 26214400
+    Description: Maximum file size accepted by the API metadata flow.
+  OpenAIApiKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: OpenAI API key used for semantic embeddings.
+  OpenAIEmbeddingModel:
+    Type: String
+    Default: text-embedding-3-small
+    Description: Embedding model used to vectorize file metadata and queries.
+  OpenAIEmbeddingDimensions:
+    Type: Number
+    Default: 0
+    Description: Optional embedding dimension override. Use 0 for the model default.
+  SemanticSearchThreshold:
+    Type: Number
+    Default: 0.5
+    Description: Minimum semantic score before results fall back to keyword ranking.
+  SemanticSearchCandidates:
+    Type: Number
+    Default: 200
+    Description: Number of per-user candidate records to evaluate for semantic search.
+  PartialSearchCandidates:
+    Type: Number
+    Default: 200
+    Description: Number of per-user candidate records to evaluate for partial search.
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 10
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        S3_BUCKET_NAME: !Ref BucketName
+        DYNAMODB_TABLE: !Ref TableName
+        FRONTEND_ORIGIN: !Ref FrontendOrigin
+        OWNER_INDEX_NAME: !Ref OwnerIndexName
+        MAX_UPLOAD_SIZE_BYTES: !Ref MaxUploadSizeBytes
+        OPENAI_API_KEY: !Ref OpenAIApiKey
+        OPENAI_EMBEDDING_MODEL: !Ref OpenAIEmbeddingModel
+        OPENAI_EMBEDDING_DIMENSIONS: !Ref OpenAIEmbeddingDimensions
+        SEMANTIC_SEARCH_THRESHOLD: !Ref SemanticSearchThreshold
+        SEMANTIC_SEARCH_CANDIDATES: !Ref SemanticSearchCandidates
+        PARTIAL_SEARCH_CANDIDATES: !Ref PartialSearchCandidates
+        OPENAI_TIMEOUT_MS: 8000
+
+Resources:
+  FileFinderUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: FileFinderUsers
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: false
+        - Name: name
+          Required: true
+          Mutable: true
+
+  FileFinderUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: FileFinderWebClient
+      UserPoolId: !Ref FileFinderUserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  FileFinderApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Cors:
+        AllowMethods: "'OPTIONS,GET,POST,DELETE'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: !Sub "'${FrontendOrigin}'"
+      MethodSettings:
+        - HttpMethod: "*"
+          ResourcePath: "/*"
+          MetricsEnabled: true
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt FileFinderUserPool.Arn
+
+  UploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: uploadLambda.handler
+      Timeout: 20
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref BucketName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TableName
+      Events:
+        UploadApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileFinderApi
+            Path: /upload
+            Method: post
+
+  SearchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: searchLambda.handler
+      Timeout: 20
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref BucketName
+        - DynamoDBReadPolicy:
+            TableName: !Ref TableName
+      Events:
+        SearchApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileFinderApi
+            Path: /search
+            Method: post
+        SearchApiLegacyGet:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileFinderApi
+            Path: /search
+            Method: get
+
+  PartialSearchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: partialSearchLambda.handler
+      Timeout: 20
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref BucketName
+        - DynamoDBReadPolicy:
+            TableName: !Ref TableName
+      Events:
+        PartialSearchApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileFinderApi
+            Path: /search/partial
+            Method: post
+
+  DeleteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: deleteLambda.handler
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref BucketName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TableName
+      Events:
+        DeleteApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileFinderApi
+            Path: /delete
+            Method: delete
+
+  ListFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: listLambda.handler
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref BucketName
+        - DynamoDBReadPolicy:
+            TableName: !Ref TableName
+      Events:
+        ListApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileFinderApi
+            Path: /files
+            Method: get
+
+  DashboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: dashboardLambda.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TableName
+      Events:
+        DashboardApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileFinderApi
+            Path: /dashboard
+            Method: get
+
+  FileAccessFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: fileAccessLambda.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TableName
+      Events:
+        FileAccessApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileFinderApi
+            Path: /file/access
+            Method: post
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway base URL
+    Value: !Sub "https://${FileFinderApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  S3BucketName:
+    Description: Name of the S3 bucket
+    Value: !Ref BucketName
+  DynamoDBTableName:
+    Description: Name of the DynamoDB table
+    Value: !Ref TableName
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID for the frontend
+    Value: !Ref FileFinderUserPool
+  CognitoUserPoolClientId:
+    Description: Cognito App Client ID for the frontend
+    Value: !Ref FileFinderUserPoolClient
